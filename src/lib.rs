@@ -1,0 +1,16 @@
+mod fruit;
+mod fruit_harvest;
+mod fruit_render;
+mod item;
+mod perfect_fruit;
+mod perfect_fruit_policy;
+mod quick_use;
+mod quick_use_policy;
+
+#[skyline::main(name = "additions-patches")]
+pub fn main() {
+    if fruit::install() {
+        perfect_fruit::install();
+    }
+    quick_use::install();
+}
