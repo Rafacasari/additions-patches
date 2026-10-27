@@ -1,7 +1,7 @@
 use std::cell::Cell;
 
 use nookkit::screens::{CommandSelect, PocketMenu};
-use nookkit::{pages, Key, KeyEvent, Page, Result, Seq, SeqState, Ui};
+use nookkit::{pages, Key, Page, Result, Seq, SeqState, Ui};
 
 use super::house::inside_own_house;
 use super::{APPEAR, IDLE, PLAY};
@@ -30,7 +30,16 @@ pub(super) fn install(ui: Ui) -> Result {
         let zl = page.bind_key(Key::Zl).guide_label("ap_drop").build()?;
 
         zr.on_trigger(move |_| request(page, Action::Use))?;
-        zl.on_trigger(move |event| request(page, drop_action(event)))?;
+        zl.on_trigger(move |event| {
+            request(
+                page,
+                if inside_own_house(event.player) {
+                    Action::Transfer
+                } else {
+                    Action::Drop
+                },
+            )
+        })?;
 
         // Only the normal pockets, not selling, donating, …
         page.on_activate(move |seq| {
@@ -41,6 +50,7 @@ pub(super) fn install(ui: Ui) -> Result {
 
             zr.set_enabled(normal)?;
             zl.set_enabled(normal)?;
+
             zl.set_guide_label(if inside_own_house(seq.player()?) {
                 "ap_transfer"
             } else {
@@ -66,23 +76,17 @@ pub(super) fn install(ui: Ui) -> Result {
     })
 }
 
-fn drop_action(event: KeyEvent) -> Action {
-    if inside_own_house(event.player) {
-        Action::Transfer
-    } else {
-        Action::Drop
-    }
-}
-
 fn request(page: Page, action: Action) -> Result {
     let Some(seq) = page.seq()? else {
         return Ok(());
     };
+
     let Some(pocket) = seq.downcast::<PocketMenu>()? else {
         return Ok(());
     };
 
     let slot = pocket.focused_slot()?;
+
     let ready = seq.state()? == PLAY
         && !seq.has_request()?
         && pocket.mode()? == 0
@@ -122,14 +126,17 @@ fn intercept(seq: Seq) -> Result {
     let Some(request) = REQUEST.with(Cell::get) else {
         return Ok(());
     };
+
     if seq.state_frame()? != 0 || seq.has_request()? {
         return Ok(());
     }
+
     REQUEST.with(|request| request.set(None));
 
     let (Some(select), Some(parent)) = (seq.downcast::<CommandSelect>()?, seq.parent()?) else {
         return Ok(());
     };
+
     let Some(pocket) = parent.downcast::<PocketMenu>()? else {
         return Ok(());
     };
@@ -154,6 +161,7 @@ fn answer(seq: Seq) -> Result {
     let Some(action) = ANSWERING.with(Cell::take) else {
         return Ok(());
     };
+
     let Some(select) = seq.downcast::<CommandSelect>()? else {
         return Ok(());
     };
