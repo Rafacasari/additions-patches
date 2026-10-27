@@ -12,5 +12,9 @@ pub fn main() {
     if fruit::install() {
         perfect_fruit::install();
     }
-    quick_use::install();
+
+    match nookkit::connect("additions-patches") {
+        Ok(ui) => quick_use::install(ui),
+        Err(e) => skyline::println!("[additions-patches] Inventory patches skipped: {e}"),
+    }
 }

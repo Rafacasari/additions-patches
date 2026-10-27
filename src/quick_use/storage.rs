@@ -1,124 +1,120 @@
-use super::{
-    hints, input_enabled, inside_own_house,
-    native::{state, GuideButton, PlayerRef, PocketMenu, PocketOptions, StorageMenu},
-    pressed, text,
-};
-use crate::quick_use_policy::storage_overlay_allowed;
-use std::{cell::Cell, mem, ptr};
+use std::cell::Cell;
 
-use super::offsets::{OPEN_POCKETS, STORAGE_GUIDE, STORAGE_PLAY};
+use nookkit::screens::Storage;
+use nookkit::{pages, Key, Page, Result, Seq, Ui};
+
+use super::house::inside_own_house;
+use super::{APPEAR, PLAY};
+use crate::quick_use_policy::storage_events_clear;
 
 #[derive(Clone, Copy)]
 struct Overlay {
-    storage: usize,
-    pockets: usize,
-    player: u8,
+    storage: Page,
+    pockets: Seq,
 }
 
 thread_local! {
-    // Identities only: dereference the current callback/global objects below.
     static OVERLAY: Cell<Option<Overlay>> = const { Cell::new(None) };
 }
 
-unsafe fn house_storage(menu: *const StorageMenu) -> bool {
-    // D-pad storage can belong to the house controller, not the generic flow.
-    matches!((*menu).mode, 0 | 1)
-        && (*menu).sequence.player.0 < 8
-        && inside_own_house(ptr::addr_of!((*menu).sequence.player))
+pub(super) fn install(ui: Ui) -> Result {
+    ui.on_page::<pages::Storage>(move |page| {
+        // Consumed, so the house's own X (accent wall options) never sees it
+        let x = page.bind_key(Key::X).consume().guide_label("3915").build()?;
+        x.set_enabled(false)?;
+        x.on_trigger(move |_| open_pockets(ui, page))?;
+
+        page.on_activate(move |seq| {
+            let house = house_storage(seq)?;
+
+            x.set_enabled(house)?;
+            // X Pockets replaces the wall-specific X labels
+            page.set_guide_hidden(Key::X, house)
+        })?;
+
+        page.on_state(PLAY).before_exec(move |seq| hold(page, seq))?;
+
+        Ok(())
+    })
 }
 
-unsafe fn finished(pockets: *const PocketMenu) -> bool {
-    let sequence = ptr::addr_of!((*pockets).sequence);
-    // Same request/completion protocol as native cAddMusic_Exec.
-    (*sequence).requested == 0 && ((*(*sequence).vtable).inactive)(sequence) & 1 != 0
-}
-
-unsafe fn suspend(menu: *mut StorageMenu) {
-    let page = (*menu).page;
-    if !page.is_null() && !(*page).input.is_null() {
-        (*(*page).input).disabled = 1;
-    }
-    // Category arrows have separate enable flags, as in native Play_Exit.
-    for button in (*menu).category_buttons {
-        if !button.is_null() {
-            (*button).enabled = 0;
-        }
-    }
-    (*menu).events = 0;
-}
-
-#[skyline::hook(offset = STORAGE_PLAY)]
-unsafe fn storage_play(menu: *mut StorageMenu) {
-    let manager = hints::manager();
-    let pockets = if manager.is_null() {
-        ptr::null_mut()
-    } else {
-        (*manager).pockets
+// D-pad storage can belong to the house controller, not the generic flow
+fn house_storage(seq: Seq) -> Result<bool> {
+    let Some(storage) = seq.downcast::<Storage>()? else {
+        return Ok(false);
     };
-    if let Some(owner) = OVERLAY.with(Cell::get) {
-        if owner.storage == menu as usize
-            && owner.pockets == pockets as usize
-            && owner.player == (*menu).sequence.player.0
-            && !pockets.is_null()
-        {
-            suspend(menu);
-            if !finished(pockets) {
-                return;
-            }
-            // Native Appear reloads the cached item list after deposits, then
-            // Play_Enter restores input and the guide. Do not replay pockets B.
-            (*menu).sequence.queue_state(state::APPEAR);
-            OVERLAY.with(|pending| pending.set(None));
-            return;
-        }
-        OVERLAY.with(|pending| pending.set(None));
-    }
 
-    let page = (*menu).page;
-    if house_storage(menu)
-        && !page.is_null()
-        && storage_overlay_allowed(
-            (*menu).sequence.state,
-            (*menu).sequence.pending,
-            (*menu).events,
-            input_enabled((*page).input),
-            pressed(ptr::addr_of!((*menu).sequence.player)),
-        )
-        && !pockets.is_null()
-        && finished(pockets)
-    {
-        let open: unsafe extern "C" fn(*const PlayerRef, *const PocketOptions) =
-            mem::transmute(text().add(OPEN_POCKETS));
-        // Keep storage alive beneath normal pockets, with Close enabled.
-        open(
-            ptr::addr_of!((*menu).sequence.player),
-            &PocketOptions::NORMAL,
-        );
-        if (*pockets).sequence.requested != 0 {
-            OVERLAY.with(|pending| {
-                pending.set(Some(Overlay {
-                    storage: menu as usize,
-                    pockets: pockets as usize,
-                    player: (*menu).sequence.player.0,
-                }))
-            });
-            suspend(menu);
-            return;
-        }
-    }
-    original!()(menu);
+    Ok(matches!(storage.mode()?, 0 | 1) && inside_own_house(seq.player()?))
 }
 
-#[skyline::hook(offset = STORAGE_GUIDE)]
-unsafe fn storage_guide(menu: *mut StorageMenu, flags: u32) {
-    let add = matches!((*menu).sequence.state, state::APPEAR | state::PLAY) && house_storage(menu);
-    // Replace interior storage's wall-specific X labels with X Pockets.
-    original!()(menu, if add { flags & !0x60 } else { flags });
-    if add {
-        hints::append((*menu).sequence.player, &[(GuideButton::X, "3915")]);
+fn open_pockets(ui: Ui, page: Page) -> Result {
+    if OVERLAY.with(Cell::get).is_some_and(|o| o.storage.is_alive()) {
+        return Ok(());
     }
+
+    let Some(seq) = page.seq()? else {
+        return Ok(());
+    };
+    let Some(storage) = seq.downcast::<Storage>()? else {
+        return Ok(());
+    };
+    let Some(pockets) = (match ui.find_page::<pages::PocketMenu>()? {
+        Some(pockets) => pockets.seq()?,
+        None => None,
+    }) else {
+        return Ok(());
+    };
+
+    let ready = seq.state()? == PLAY
+        && !seq.has_request()?
+        && storage_events_clear(storage.events()?)
+        && pockets.is_idle()?
+        && !pockets.has_request()?;
+    if !ready {
+        return Ok(());
+    }
+
+    storage.clear_events()?;
+    // Normal pockets with Close, storage stays alive beneath them
+    ui.open_pocket_menu(seq.player()?, true)?;
+
+    if pockets.has_request()? {
+        suspend(page, storage)?;
+        OVERLAY.with(|overlay| overlay.set(Some(Overlay { storage: page, pockets })));
+    }
+
+    Ok(())
 }
 
-pub(super) fn install() {
-    skyline::install_hooks!(storage_play, storage_guide);
+// Category arrows have their own enable flags, as in the game's Play_Exit
+fn suspend(page: Page, storage: Storage) -> Result {
+    page.set_input_enabled(false)?;
+    storage.disable_category_arrows()?;
+    storage.clear_events()
+}
+
+fn hold(page: Page, seq: Seq) -> Result {
+    let Some(overlay) = OVERLAY.with(Cell::get).filter(|o| o.storage == page) else {
+        return Ok(());
+    };
+    let Some(storage) = seq.downcast::<Storage>()? else {
+        return Ok(());
+    };
+
+    suspend(page, storage)?;
+
+    // Pockets the game destroyed count as closed
+    let open = match (overlay.pockets.is_idle(), overlay.pockets.has_request()) {
+        (Ok(idle), Ok(request)) => !idle || request,
+        _ => false,
+    };
+    if open {
+        return Ok(());
+    }
+
+    OVERLAY.with(|overlay| overlay.set(None));
+
+    // Appear reloads the item list after deposits, then Play_Enter restores the guide
+    seq.request_state(APPEAR)?;
+    page.set_input_enabled(true)
 }
