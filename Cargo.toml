@@ -12,6 +12,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 skyline = "0.6.0"
+nookkit = { git = "https://github.com/acnhmodding/nookkit", branch = "main" }
 
 [profile.dev]
 panic = "abort"
